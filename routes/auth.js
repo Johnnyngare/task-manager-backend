@@ -159,56 +159,40 @@ router.post("/forgot-password", async (req, res) => {
       user = await User.findOne({ phoneNumber });
     } else {
       console.log("DEBUG: Invalid method/contact provided.");
-      return res
-        .status(400)
-        .json({
-          message:
-            "Email or phone number, and a valid method (email/sms) are required.",
-        });
+      return res.status(400).json({
+        message:
+          "Email or phone number, and a valid method (email/sms) are required.",
+      });
     }
 
+    // Always send a generic message if user not found to prevent user enumeration
     if (!user) {
       console.log(
-        "DEBUG: User not found for contact. Sending generic success."
+        "DEBUG: User not found for contact. Sending generic success to prevent enumeration."
       );
-      return res
-        .status(200)
-        .json({
-          message: `If an account with that ${method} exists, a password reset ${
-            method === "email" ? "link" : "code"
-          } has been sent.`,
-        });
+      return res.status(200).json({
+        message: `If an account with that ${method} exists, a password reset ${
+          method === "email" ? "link" : "code"
+        } has been sent.`,
+      });
     }
 
     console.log("DEBUG: User found:", user.email || user.phoneNumber);
 
-    const resetCode = Math.floor(100000 + Math.random() * 900000).toString(); // Always generate resetCode for SMS method
-    let hexResetToken; // Declare for email method
-
-    // Assign reset token/code based on method
-    if (method === "email") {
-      hexResetToken = crypto.randomBytes(20).toString("hex"); // Generate hex token only if email method
-      user.resetPasswordToken = hexResetToken; // Store the hex token for email
-    } else if (method === "sms") {
-      user.resetPasswordToken = resetCode; // Store the 6-digit code for SMS
-    } else {
-      // This case should be caught by the initial validation, but for safety
-      console.log(
-        "DEBUG: Method not recognized after user found. This is unexpected."
-      );
-      return res
-        .status(400)
-        .json({ message: "Invalid reset method specified." });
-    }
-
-    user.resetPasswordExpire = Date.now() + 3600000; // Token/code expires in 1 hour
-
-    console.log("DEBUG: Attempting to save user with reset token/code.");
-    await user.save(); // Save user with token/code
-    console.log("DEBUG: User saved successfully with reset token/code.");
+    // Clear any previous reset tokens/codes before setting new ones
+    user.resetPasswordToken = undefined;
+    user.resetPasswordExpire = undefined;
+    user.verificationCode = undefined;
+    user.verificationCodeExpire = undefined;
 
     if (method === "email") {
-      const resetURL = `${process.env.FRONTEND_URL}/reset-password?token=${hexResetToken}`; // Use hexResetToken here
+      const hexResetToken = crypto.randomBytes(20).toString("hex");
+      user.resetPasswordToken = hexResetToken;
+      user.resetPasswordExpire = Date.now() + 60 * 60 * 1000; // 1 hour expiration for email
+      console.log("DEBUG: Email reset token generated.");
+
+      // Send Email
+      const resetURL = `${process.env.FRONTEND_URL}/reset-password?token=${hexResetToken}`;
       const mailOptions = {
         from: process.env.EMAIL_USERNAME,
         to: user.email,
@@ -226,22 +210,22 @@ router.post("/forgot-password", async (req, res) => {
         .status(200)
         .json({ message: "Reset link sent successfully to your email." });
     } else if (method === "sms") {
-      console.log(
-        "DEBUG: Entered SMS sending block. User Phone:",
-        user.phoneNumber
-      );
+      const smsVerificationCode = Math.floor(
+        100000 + Math.random() * 900000
+      ).toString(); // 6-digit code for SMS
+      user.verificationCode = smsVerificationCode;
+      // <--- IMPORTANT CHANGE: SMS code expires in 15 minutes ---
+      user.verificationCodeExpire = Date.now() + 15 * 60 * 1000; // 15 minutes expiration for SMS
+      console.log("DEBUG: SMS verification code generated.");
 
       if (!user.phoneNumber) {
         console.error("DEBUG: User has no phone number for SMS.");
-        return res
-          .status(400)
-          .json({
-            message: "User has no phone number registered for SMS reset.",
-          });
+        return res.status(400).json({
+          message: "User has no phone number registered for SMS reset.",
+        });
       }
 
-      const smsMessage = `Your TaskForge password reset code is: ${resetCode}. It is valid for 1 hour.`;
-
+      const smsMessage = `Your TaskForge password reset code is: ${smsVerificationCode}. It is valid for 15 minutes.`;
       console.log(
         `DEBUG: Preparing to send SMS to ${user.phoneNumber} with message: "${smsMessage}" via Africa's Talking`
       );
@@ -254,11 +238,9 @@ router.post("/forgot-password", async (req, res) => {
         };
         const response = await sms.send(options); // Use the sms service
         console.log("DEBUG: Africa's Talking message sent response:", response);
-        res
-          .status(200)
-          .json({
-            message: "Reset code sent successfully to your phone number.",
-          });
+        res.status(200).json({
+          message: "Reset code sent successfully to your phone number.",
+        });
       } catch (atError) {
         console.error(
           "DEBUG: Africa's Talking API call failed specifically:",
@@ -273,21 +255,29 @@ router.post("/forgot-password", async (req, res) => {
         .status(400)
         .json({ message: "Invalid reset method specified." });
     }
+
+    await user.save({ validateBeforeSave: false }); // Save user with token/code
+    console.log("DEBUG: User saved successfully with reset token/code.");
   } catch (error) {
     // This catch block handles errors from DB queries, save, or re-thrown AT errors
     console.error(`Forgot password (${method}) FULL ERROR IN CATCH:`, error);
 
     // Attempt to clear token/expire date ONLY if user was successfully retrieved AND error occurred during send
-    if (user && user.resetPasswordToken) {
-      // Safely check if 'user' object exists and has a token to clear
-      console.log("DEBUG: Attempting to clear user token due to error.");
+    if (user) {
+      // Only attempt if user was found
+      console.log("DEBUG: Attempting to clear user token/code due to error.");
       user.resetPasswordToken = undefined;
       user.resetPasswordExpire = undefined;
+      user.verificationCode = undefined;
+      user.verificationCodeExpire = undefined;
       // Add error handling for save if it fails here
       await user
-        .save()
+        .save({ validateBeforeSave: false })
         .catch((e) =>
-          console.error("Failed to clear token on user after send error:", e)
+          console.error(
+            "Failed to clear token/code on user after send error:",
+            e
+          )
         );
     }
 
@@ -298,37 +288,29 @@ router.post("/forgot-password", async (req, res) => {
         .status(500)
         .json({ message: `Failed to send reset email: ${error.message}` });
     } else if (
-      error.message.includes("SMS send failed") ||
-      error.code === 400 ||
-      error.code === 401 ||
-      error.code === 403
+      (error.message && error.message.includes("SMS send failed")) || // AT general error message
+      (error.response &&
+        error.response.status >= 400 &&
+        error.response.status < 500) // AT errors might be in error.response
     ) {
-      // Generic AT error check (can be more specific based on AT errors)
+      // Generic AT error check (can be more specific based on AT errors, e.g., error.status)
       // Note: Africa's Talking errors might not always have a 'code' property, sometimes it's in message
-      return res
-        .status(500)
-        .json({
-          message: `Failed to send reset SMS. Please check backend logs for Africa's Talking error details.`,
-        });
+      return res.status(500).json({
+        message: `Failed to send reset SMS. Please check your phone number format (e.g., +254XXXXXXXXX) or backend logs.`,
+      });
     } else if (error.code) {
       // Other specific error codes
-      return res
-        .status(500)
-        .json({
-          message: `Failed to send reset ${
-            method === "email" ? "email" : "SMS"
-          } (Error Code: ${
-            error.code
-          }). Please check backend logs for details.`,
-        });
-    }
-    res
-      .status(500)
-      .json({
+      return res.status(500).json({
         message: `Failed to send reset ${
           method === "email" ? "email" : "SMS"
-        }. Server error.`,
+        } (Error Code: ${error.code}). Please check backend logs for details.`,
       });
+    }
+    res.status(500).json({
+      message: `Failed to send reset ${
+        method === "email" ? "email" : "SMS"
+      }. Server error.`,
+    });
   }
 });
 
@@ -339,26 +321,34 @@ router.post("/reset-password", async (req, res) => {
   const { token, newPassword } = req.body; // 'token' here is the actual token/code received
 
   try {
-    // Find user by token/code and check if it's expired
-    const user = await User.findOne({
+    // Try to find user by email reset token first
+    let user = await User.findOne({
       resetPasswordToken: token,
-      resetPasswordExpire: { $gt: Date.now() }, // Token/code not expired (greater than now)
+      resetPasswordExpire: { $gt: Date.now() }, // Token not expired
     });
 
     if (!user) {
-      return res
-        .status(400)
-        .json({
-          message: "Password reset token/code is invalid or has expired.",
-        });
+      // If not found by email token, try to find by SMS verification code
+      user = await User.findOne({
+        verificationCode: token, // Assuming 'token' from frontend is the 6-digit code
+        verificationCodeExpire: { $gt: Date.now() }, // Code not expired
+      });
+    }
+
+    if (!user) {
+      return res.status(400).json({
+        message: "Password reset token/code is invalid or has expired.",
+      });
     }
 
     // Update password (User model pre-save hook will hash this new password)
     user.password = newPassword;
 
-    // Clear token fields after successful reset
+    // Clear all token/code fields after successful reset
     user.resetPasswordToken = undefined;
     user.resetPasswordExpire = undefined;
+    user.verificationCode = undefined;
+    user.verificationCodeExpire = undefined;
 
     await user.save(); // This will trigger the pre-save hook to hash the new password
 

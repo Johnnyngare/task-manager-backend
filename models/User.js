@@ -8,7 +8,7 @@ const UserSchema = new mongoose.Schema({
     type: String,
     required: true,
     unique: true, // Ensures usernames are unique
-    trim: true,   // Remove whitespace from both ends of a string
+    trim: true, // Remove whitespace from both ends of a string
     minlength: 3, // Optional: add min length for username
   },
   email: {
@@ -17,7 +17,7 @@ const UserSchema = new mongoose.Schema({
     unique: true, // Ensures emails are unique
     trim: true,
     lowercase: true, // Store emails in lowercase for consistency
-    match: [/.+@.+\..+/, 'Please fill a valid email address'] // Basic email regex validation
+    match: [/.+@.+\..+/, "Please fill a valid email address"], // Basic email regex validation
   },
   password: {
     type: String,
@@ -36,6 +36,10 @@ const UserSchema = new mongoose.Schema({
   // Fields for password reset mechanism
   resetPasswordToken: String,
   resetPasswordExpire: Date,
+
+  // --- NEW FIELDS FOR SMS VERIFICATION CODE ---
+  verificationCode: String, // Stores the 6-digit SMS code
+  verificationCodeExpire: Date, // Stores the expiration date for the SMS code
   date: {
     type: Date,
     default: Date.now,
@@ -54,7 +58,12 @@ UserSchema.pre("save", async function (next) {
   // If password was modified, ensure it's a plaintext password before hashing.
   // This check prevents re-hashing an already hashed password, which would break authentication.
   // We assume a plaintext password will not look like a bcrypt hash (which starts with $2a$, $2b$, or $2y$)
-  if (this.password && !this.password.startsWith('$2a$') && !this.password.startsWith('$2b$') && !this.password.startsWith('$2y$')) {
+  if (
+    this.password &&
+    !this.password.startsWith("$2a$") &&
+    !this.password.startsWith("$2b$") &&
+    !this.password.startsWith("$2y$")
+  ) {
     const salt = await bcrypt.genSalt(10); // Generate a salt
     this.password = await bcrypt.hash(this.password, salt); // Hash the password
   } else if (!this.password) {
