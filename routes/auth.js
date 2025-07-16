@@ -8,6 +8,7 @@ const crypto = require("crypto"); // Node.js built-in for secure token generatio
 const nodemailer = require("nodemailer"); // For sending emails
 const AfricasTalking = require("africastalking"); // Import Africa's Talking SDK
 const { protect } = require("../middleware/auth"); // Import auth middleware for change-password route
+const passport = require("passport"); // NEW: Import Passport.js
 
 // Helper to generate JWT token (existing)
 const generateToken = (id) => {
@@ -26,7 +27,6 @@ const transporter = nodemailer.createTransport({
 });
 
 // --- AFRICA'S TALKING Client ---
-// Add console.log statements to verify credentials are read from .env on backend startup
 console.log(
   "DEBUG: AT API_KEY from .env:",
   process.env.AT_API_KEY
@@ -47,11 +47,10 @@ const africastalkingClient = AfricasTalking({
   username: process.env.AT_USERNAME,
 });
 
-// Get the SMS service
 const sms = africastalkingClient.SMS;
 
 // ----------------------------------------------------------------------
-//                        EXISTING AUTH ROUTES
+//                        STANDARD AUTH ROUTES
 // ----------------------------------------------------------------------
 
 // @route   POST /api/auth/register
@@ -62,9 +61,19 @@ router.post("/register", async (req, res) => {
 
   try {
     // Check if user exists by email or username
+    // Also check if email exists and is linked to a Google account without a password
     let userExists = await User.findOne({ $or: [{ email }, { username }] });
     if (userExists) {
       if (userExists.email === email) {
+        // If email matches an existing Google-only user, prompt them to use Google login
+        if (userExists.googleId && !userExists.password) {
+          return res
+            .status(400)
+            .json({
+              message:
+                "This email is registered via Google. Please use 'Sign in with Google' or your existing password.",
+            });
+        }
         return res
           .status(400)
           .json({ message: "User with that email already exists" });
@@ -83,15 +92,14 @@ router.post("/register", async (req, res) => {
 
     await newUser.save();
 
-    // After successful registration, log them in by generating and setting a token cookie
     const token = generateToken(newUser._id);
     const cookieOptions = {
-      expires: new Date(Date.now() + 60 * 60 * 1000), // 1 hour in milliseconds
-      httpOnly: true, // Not accessible via client-side JavaScript
-      secure: process.env.NODE_ENV === "production", // Only sent over HTTPS in production
-      sameSite: "Lax", // Protects against CSRF
+      expires: new Date(Date.now() + 60 * 60 * 1000), // 1 hour
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "Lax",
     };
-    res.cookie("token", token, cookieOptions); // Set the authentication token cookie
+    res.cookie("token", token, cookieOptions);
 
     res.status(201).json({
       _id: newUser._id,
@@ -101,7 +109,6 @@ router.post("/register", async (req, res) => {
     });
   } catch (error) {
     console.error("Registration error:", error);
-    // Mongoose validation errors
     if (error.name === "ValidationError") {
       const messages = Object.values(error.errors).map((val) => val.message);
       return res.status(400).json({ message: messages.join(", ") });
@@ -117,27 +124,35 @@ router.post("/login", async (req, res) => {
   const { email, password } = req.body;
 
   try {
-    // Check if user exists by email
     const user = await User.findOne({ email });
     if (!user) {
       return res.status(400).json({ message: "Invalid credentials" });
     }
 
-    // Check password
+    // --- NEW: Handle users without a password (e.g., Google OAuth users) ---
+    // If user has no password stored (meaning they registered via Google only),
+    // they cannot log in via traditional means.
+    if (!user.password) {
+      return res
+        .status(400)
+        .json({
+          message:
+            "This account is linked to Google. Please sign in with Google.",
+        });
+    }
+
     const isMatch = await user.matchPassword(password);
     if (!isMatch) {
       return res.status(400).json({ message: "Invalid credentials" });
     }
 
     const token = generateToken(user._id);
-
     const cookieOptions = {
-      expires: new Date(Date.now() + 60 * 60 * 1000), // 1 hour in milliseconds
+      expires: new Date(Date.now() + 60 * 60 * 1000), // 1 hour
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
       sameSite: "Lax",
     };
-
     res.cookie("token", token, cookieOptions);
 
     res.json({
@@ -155,24 +170,17 @@ router.post("/login", async (req, res) => {
   }
 });
 
-// --- LOGOUT ROUTE (UPDATED) ---
 // @route   GET /api/auth/logout
 // @desc    Log out user by clearing the authentication cookie
 // @access  Public
 router.get("/logout", (req, res) => {
-  // Use res.clearCookie() for the most reliable way to remove a cookie.
-  // You must provide the cookie name and, importantly, the same options
-  // (like 'path' and 'domain') that were used to set the cookie.
   const cookieOptions = {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
     sameSite: "Lax",
-    path: "/", // Explicitly set path to ensure it matches the set cookie
-    // domain: '.yourdomain.com' // Add if you used a domain when setting the cookie
+    path: "/",
   };
-
-  res.clearCookie("token", cookieOptions); // Clear the 'token' cookie
-
+  res.clearCookie("token", cookieOptions);
   res.status(200).json({ success: true, message: "Logged out successfully!" });
 });
 
@@ -202,6 +210,60 @@ router.get("/me", protect, async (req, res) => {
 });
 
 // ----------------------------------------------------------------------
+//                        GOOGLE OAUTH ROUTES (NEW)
+// ----------------------------------------------------------------------
+
+// @route   GET /api/auth/google
+// @desc    Initiate Google OAuth login flow
+// @access  Public
+router.get(
+  "/google",
+  // Passport middleware to start the Google authentication flow
+  passport.authenticate("google", {
+    scope: ["profile", "email"], // Request user's profile and email
+    session: false, // Tell Passport not to use traditional sessions; we use JWTs
+  })
+);
+
+// @route   GET /api/auth/google/callback
+// @desc    Google OAuth callback URL
+// @access  Public
+router.get(
+  "/google/callback",
+  // Passport middleware to handle the callback from Google
+  passport.authenticate("google", {
+    failureRedirect: `${process.env.FRONTEND_URL}/login?error=google_auth_failed`, // Redirect to login page on failure
+    session: false, // Tell Passport not to use traditional sessions
+  }),
+  // This function executes only if Google authentication was successful.
+  // Passport attaches the authenticated user (from your database, resolved by `passport-setup.js`) to `req.user`.
+  (req, res) => {
+    console.log(
+      "DEBUG: Successfully authenticated with Google, user in req.user:",
+      req.user.email || req.user.username
+    );
+
+    // Generate YOUR app's JWT for this user (same as standard login)
+    const token = generateToken(req.user._id);
+
+    // Set the JWT in an httpOnly cookie
+    const cookieOptions = {
+      expires: new Date(Date.now() + 60 * 60 * 1000), // 1 hour
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "Lax",
+    };
+    res.cookie("token", token, cookieOptions);
+    console.log(
+      "DEBUG: JWT cookie set for Google user, redirecting to frontend."
+    );
+
+    // Redirect the user back to your frontend's main dashboard
+    res.redirect(`${process.env.FRONTEND_URL}/tasks`);
+  }
+);
+
+// ----------------------------------------------------------------------
 //                        PASSWORD MANAGEMENT ROUTES
 // ----------------------------------------------------------------------
 
@@ -210,7 +272,6 @@ router.get("/me", protect, async (req, res) => {
 // @access  Public
 router.post("/forgot-password", async (req, res) => {
   const { email, phoneNumber, method } = req.body;
-
   let user;
   console.log(
     "DEBUG: Forgot password request received. Method:",
@@ -226,21 +287,39 @@ router.post("/forgot-password", async (req, res) => {
       user = await User.findOne({ phoneNumber });
     } else {
       console.log("DEBUG: Invalid method/contact provided.");
-      return res.status(400).json({
-        message:
-          "Email or phone number, and a valid method (email/sms) are required.",
-      });
+      return res
+        .status(400)
+        .json({
+          message:
+            "Email or phone number, and a valid method (email/sms) are required.",
+        });
     }
 
     if (!user) {
       console.log(
         "DEBUG: User not found for contact. Sending generic success to prevent enumeration."
       );
-      return res.status(200).json({
-        message: `If an account with that ${method} exists, a password reset ${
-          method === "email" ? "link" : "code"
-        } has been sent.`,
-      });
+      return res
+        .status(200)
+        .json({
+          message: `If an account with that ${method} exists, a password reset ${
+            method === "email" ? "link" : "code"
+          } has been sent.`,
+        });
+    }
+
+    // --- NEW: Prevent password reset for Google-only accounts ---
+    // If user has a googleId but no local password, they can't reset it traditionally.
+    if (user.googleId && !user.password) {
+      console.log(
+        `DEBUG: Password reset attempted for Google-only account ${user.email}. Denying.`
+      );
+      return res
+        .status(400)
+        .json({
+          message:
+            "This account is linked to Google. Please sign in with Google.",
+        });
     }
 
     console.log("DEBUG: User found:", user.email || user.phoneNumber);
@@ -283,9 +362,11 @@ router.post("/forgot-password", async (req, res) => {
 
       if (!user.phoneNumber) {
         console.error("DEBUG: User has no phone number for SMS.");
-        return res.status(400).json({
-          message: "User has no phone number registered for SMS reset.",
-        });
+        return res
+          .status(400)
+          .json({
+            message: "User has no phone number registered for SMS reset.",
+          });
       }
 
       const smsMessage = `Your TaskForge password reset code is: ${smsVerificationCode}. It is valid for 15 minutes.`;
@@ -301,9 +382,11 @@ router.post("/forgot-password", async (req, res) => {
         };
         const response = await sms.send(options);
         console.log("DEBUG: Africa's Talking message sent response:", response);
-        res.status(200).json({
-          message: "Reset code sent successfully to your phone number.",
-        });
+        res
+          .status(200)
+          .json({
+            message: "Reset code sent successfully to your phone number.",
+          });
       } catch (atError) {
         console.error(
           "DEBUG: Africa's Talking API call failed specifically:",
@@ -350,21 +433,29 @@ router.post("/forgot-password", async (req, res) => {
         error.response.status >= 400 &&
         error.response.status < 500)
     ) {
-      return res.status(500).json({
-        message: `Failed to send reset SMS. Please check your phone number format (e.g., +254XXXXXXXXX) or backend logs.`,
-      });
+      return res
+        .status(500)
+        .json({
+          message: `Failed to send reset SMS. Please check your phone number format (e.g., +254XXXXXXXXX) or backend logs.`,
+        });
     } else if (error.code) {
-      return res.status(500).json({
+      return res
+        .status(500)
+        .json({
+          message: `Failed to send reset ${
+            method === "email" ? "email" : "SMS"
+          } (Error Code: ${
+            error.code
+          }). Please check backend logs for details.`,
+        });
+    }
+    res
+      .status(500)
+      .json({
         message: `Failed to send reset ${
           method === "email" ? "email" : "SMS"
-        } (Error Code: ${error.code}). Please check backend logs for details.`,
+        }. Server error.`,
       });
-    }
-    res.status(500).json({
-      message: `Failed to send reset ${
-        method === "email" ? "email" : "SMS"
-      }. Server error.`,
-    });
   }
 });
 
@@ -388,9 +479,31 @@ router.post("/reset-password", async (req, res) => {
     }
 
     if (!user) {
-      return res.status(400).json({
-        message: "Password reset token/code is invalid or has expired.",
-      });
+      return res
+        .status(400)
+        .json({
+          message: "Password reset token/code is invalid or has expired.",
+        });
+    }
+
+    // --- NEW: Prevent resetting password for Google-only accounts ---
+    // If user has a googleId but no local password, they cannot set a password this way.
+    if (user.googleId && !user.password) {
+      console.log(
+        `DEBUG: Password reset attempted for Google-only account via token/code. Denying.`
+      );
+      // To be safe, also clear any tokens if this was an attempt on a Google-only account
+      user.resetPasswordToken = undefined;
+      user.resetPasswordExpire = undefined;
+      user.verificationCode = undefined;
+      user.verificationCodeExpire = undefined;
+      await user.save({ validateBeforeSave: false }); // Save to clear tokens
+      return res
+        .status(400)
+        .json({
+          message:
+            "This account is linked to Google. You cannot reset its password this way. Please sign in with Google.",
+        });
     }
 
     user.password = newPassword;
@@ -424,6 +537,17 @@ router.put("/change-password", protect, async (req, res) => {
     const user = await User.findById(req.user._id);
     if (!user) {
       return res.status(404).json({ message: "User not found." });
+    }
+
+    // --- NEW: Prevent changing password for Google-only accounts ---
+    // If user has a googleId but no local password, they cannot change a non-existent password.
+    if (user.googleId && !user.password) {
+      return res
+        .status(400)
+        .json({
+          message:
+            "This account is linked to Google and does not have a local password. Please sign in with Google.",
+        });
     }
 
     const isMatch = await user.matchPassword(currentPassword);
