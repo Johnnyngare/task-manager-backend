@@ -83,11 +83,21 @@ router.post("/register", async (req, res) => {
 
     await newUser.save();
 
+    // After successful registration, log them in by generating and setting a token cookie
+    const token = generateToken(newUser._id);
+    const cookieOptions = {
+      expires: new Date(Date.now() + 60 * 60 * 1000), // 1 hour in milliseconds
+      httpOnly: true, // Not accessible via client-side JavaScript
+      secure: process.env.NODE_ENV === "production", // Only sent over HTTPS in production
+      sameSite: "Lax", // Protects against CSRF
+    };
+    res.cookie("token", token, cookieOptions); // Set the authentication token cookie
+
     res.status(201).json({
       _id: newUser._id,
       username: newUser.username,
       email: newUser.email,
-      token: generateToken(newUser._id),
+      message: "Registration successful and logged in!",
     });
   } catch (error) {
     console.error("Registration error:", error);
@@ -119,18 +129,75 @@ router.post("/login", async (req, res) => {
       return res.status(400).json({ message: "Invalid credentials" });
     }
 
+    const token = generateToken(user._id);
+
+    const cookieOptions = {
+      expires: new Date(Date.now() + 60 * 60 * 1000), // 1 hour in milliseconds
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "Lax",
+    };
+
+    res.cookie("token", token, cookieOptions);
+
     res.json({
       _id: user._id,
       username: user.username,
       email: user.email,
-      profileImageUrl: user.profileImageUrl, // Include if exists
-      phoneNumber: user.phoneNumber, // Include if exists
-      date: user.date, // Include if exists
-      token: generateToken(user._id),
+      profileImageUrl: user.profileImageUrl,
+      phoneNumber: user.phoneNumber,
+      date: user.date,
+      message: "Logged in successfully!",
     });
   } catch (error) {
     console.error("Login error:", error);
     res.status(500).send("Server error during login.");
+  }
+});
+
+// --- LOGOUT ROUTE (UPDATED) ---
+// @route   GET /api/auth/logout
+// @desc    Log out user by clearing the authentication cookie
+// @access  Public
+router.get("/logout", (req, res) => {
+  // Use res.clearCookie() for the most reliable way to remove a cookie.
+  // You must provide the cookie name and, importantly, the same options
+  // (like 'path' and 'domain') that were used to set the cookie.
+  const cookieOptions = {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "Lax",
+    path: "/", // Explicitly set path to ensure it matches the set cookie
+    // domain: '.yourdomain.com' // Add if you used a domain when setting the cookie
+  };
+
+  res.clearCookie("token", cookieOptions); // Clear the 'token' cookie
+
+  res.status(200).json({ success: true, message: "Logged out successfully!" });
+});
+
+// @route   GET /api/auth/me
+// @desc    Get logged in user data (for UI refresh / initial state)
+// @access  Private (uses the 'protect' middleware)
+router.get("/me", protect, async (req, res) => {
+  try {
+    const user = req.user;
+    res.status(200).json({
+      success: true,
+      user: {
+        _id: user._id,
+        username: user.username,
+        email: user.email,
+        profileImageUrl: user.profileImageUrl,
+        phoneNumber: user.phoneNumber,
+        date: user.date,
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching /me route:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "Server error fetching user data." });
   }
 });
 
@@ -144,7 +211,7 @@ router.post("/login", async (req, res) => {
 router.post("/forgot-password", async (req, res) => {
   const { email, phoneNumber, method } = req.body;
 
-  let user; // Declared here so it's accessible in outer catch block
+  let user;
   console.log(
     "DEBUG: Forgot password request received. Method:",
     method,
@@ -165,7 +232,6 @@ router.post("/forgot-password", async (req, res) => {
       });
     }
 
-    // Always send a generic message if user not found to prevent user enumeration
     if (!user) {
       console.log(
         "DEBUG: User not found for contact. Sending generic success to prevent enumeration."
@@ -179,7 +245,6 @@ router.post("/forgot-password", async (req, res) => {
 
     console.log("DEBUG: User found:", user.email || user.phoneNumber);
 
-    // Clear any previous reset tokens/codes before setting new ones
     user.resetPasswordToken = undefined;
     user.resetPasswordExpire = undefined;
     user.verificationCode = undefined;
@@ -188,10 +253,9 @@ router.post("/forgot-password", async (req, res) => {
     if (method === "email") {
       const hexResetToken = crypto.randomBytes(20).toString("hex");
       user.resetPasswordToken = hexResetToken;
-      user.resetPasswordExpire = Date.now() + 60 * 60 * 1000; // 1 hour expiration for email
+      user.resetPasswordExpire = Date.now() + 60 * 60 * 1000;
       console.log("DEBUG: Email reset token generated.");
 
-      // Send Email
       const resetURL = `${process.env.FRONTEND_URL}/reset-password?token=${hexResetToken}`;
       const mailOptions = {
         from: process.env.EMAIL_USERNAME,
@@ -212,10 +276,9 @@ router.post("/forgot-password", async (req, res) => {
     } else if (method === "sms") {
       const smsVerificationCode = Math.floor(
         100000 + Math.random() * 900000
-      ).toString(); // 6-digit code for SMS
+      ).toString();
       user.verificationCode = smsVerificationCode;
-      // <--- IMPORTANT CHANGE: SMS code expires in 15 minutes ---
-      user.verificationCodeExpire = Date.now() + 15 * 60 * 1000; // 15 minutes expiration for SMS
+      user.verificationCodeExpire = Date.now() + 15 * 60 * 1000;
       console.log("DEBUG: SMS verification code generated.");
 
       if (!user.phoneNumber) {
@@ -232,11 +295,11 @@ router.post("/forgot-password", async (req, res) => {
 
       try {
         const options = {
-          to: user.phoneNumber, // Recipient's phone number from DB (must be E.164 format)
+          to: user.phoneNumber,
           message: smsMessage,
-          from: process.env.AT_SENDER_ID || undefined, // Use Sender ID if provided, otherwise AT default
+          from: process.env.AT_SENDER_ID || undefined,
         };
-        const response = await sms.send(options); // Use the sms service
+        const response = await sms.send(options);
         console.log("DEBUG: Africa's Talking message sent response:", response);
         res.status(200).json({
           message: "Reset code sent successfully to your phone number.",
@@ -247,7 +310,7 @@ router.post("/forgot-password", async (req, res) => {
           atError.message
         );
         console.error("DEBUG: Africa's Talking error object:", atError);
-        throw atError; // Re-throw to main catch block
+        throw atError;
       }
     } else {
       console.log("DEBUG: Method not recognized.");
@@ -256,21 +319,17 @@ router.post("/forgot-password", async (req, res) => {
         .json({ message: "Invalid reset method specified." });
     }
 
-    await user.save({ validateBeforeSave: false }); // Save user with token/code
+    await user.save({ validateBeforeSave: false });
     console.log("DEBUG: User saved successfully with reset token/code.");
   } catch (error) {
-    // This catch block handles errors from DB queries, save, or re-thrown AT errors
     console.error(`Forgot password (${method}) FULL ERROR IN CATCH:`, error);
 
-    // Attempt to clear token/expire date ONLY if user was successfully retrieved AND error occurred during send
     if (user) {
-      // Only attempt if user was found
       console.log("DEBUG: Attempting to clear user token/code due to error.");
       user.resetPasswordToken = undefined;
       user.resetPasswordExpire = undefined;
       user.verificationCode = undefined;
       user.verificationCodeExpire = undefined;
-      // Add error handling for save if it fails here
       await user
         .save({ validateBeforeSave: false })
         .catch((e) =>
@@ -281,25 +340,20 @@ router.post("/forgot-password", async (req, res) => {
         );
     }
 
-    // Distinguish errors for frontend message
     if (error.code === "EAUTH" || error.code === "EENVELOPE") {
-      // Nodemailer errors
       return res
         .status(500)
         .json({ message: `Failed to send reset email: ${error.message}` });
     } else if (
-      (error.message && error.message.includes("SMS send failed")) || // AT general error message
+      (error.message && error.message.includes("SMS send failed")) ||
       (error.response &&
         error.response.status >= 400 &&
-        error.response.status < 500) // AT errors might be in error.response
+        error.response.status < 500)
     ) {
-      // Generic AT error check (can be more specific based on AT errors, e.g., error.status)
-      // Note: Africa's Talking errors might not always have a 'code' property, sometimes it's in message
       return res.status(500).json({
         message: `Failed to send reset SMS. Please check your phone number format (e.g., +254XXXXXXXXX) or backend logs.`,
       });
     } else if (error.code) {
-      // Other specific error codes
       return res.status(500).json({
         message: `Failed to send reset ${
           method === "email" ? "email" : "SMS"
@@ -318,20 +372,18 @@ router.post("/forgot-password", async (req, res) => {
 // @desc    Reset password with token/code
 // @access  Public
 router.post("/reset-password", async (req, res) => {
-  const { token, newPassword } = req.body; // 'token' here is the actual token/code received
+  const { token, newPassword } = req.body;
 
   try {
-    // Try to find user by email reset token first
     let user = await User.findOne({
       resetPasswordToken: token,
-      resetPasswordExpire: { $gt: Date.now() }, // Token not expired
+      resetPasswordExpire: { $gt: Date.now() },
     });
 
     if (!user) {
-      // If not found by email token, try to find by SMS verification code
       user = await User.findOne({
-        verificationCode: token, // Assuming 'token' from frontend is the 6-digit code
-        verificationCodeExpire: { $gt: Date.now() }, // Code not expired
+        verificationCode: token,
+        verificationCodeExpire: { $gt: Date.now() },
       });
     }
 
@@ -341,21 +393,17 @@ router.post("/reset-password", async (req, res) => {
       });
     }
 
-    // Update password (User model pre-save hook will hash this new password)
     user.password = newPassword;
-
-    // Clear all token/code fields after successful reset
     user.resetPasswordToken = undefined;
     user.resetPasswordExpire = undefined;
     user.verificationCode = undefined;
     user.verificationCodeExpire = undefined;
 
-    await user.save(); // This will trigger the pre-save hook to hash the new password
+    await user.save();
 
     res.status(200).json({ message: "Password has been reset successfully." });
   } catch (error) {
     console.error("Reset password error:", error);
-    // Mongoose validation errors during save (e.g. password minlength)
     if (error.name === "ValidationError") {
       const messages = Object.values(error.errors).map((val) => val.message);
       return res.status(400).json({ message: messages.join(", ") });
@@ -373,12 +421,11 @@ router.put("/change-password", protect, async (req, res) => {
   const { currentPassword, newPassword } = req.body;
 
   try {
-    const user = await User.findById(req.user._id); // req.user._id comes from 'protect' middleware
+    const user = await User.findById(req.user._id);
     if (!user) {
-      return res.status(404).json({ message: "User not found." }); // Should not happen if protect works
+      return res.status(404).json({ message: "User not found." });
     }
 
-    // Verify current password
     const isMatch = await user.matchPassword(currentPassword);
     if (!isMatch) {
       return res
@@ -386,14 +433,12 @@ router.put("/change-password", protect, async (req, res) => {
         .json({ message: "Current password is incorrect." });
     }
 
-    // Update password (pre-save hook will hash newPassword)
     user.password = newPassword;
     await user.save();
 
     res.status(200).json({ message: "Password changed successfully." });
   } catch (error) {
     console.error("Change password error:", error);
-    // Mongoose validation errors during save (e.g. newPassword minlength)
     if (error.name === "ValidationError") {
       const messages = Object.values(error.errors).map((val) => val.message);
       return res.status(400).json({ message: messages.join(", ") });
