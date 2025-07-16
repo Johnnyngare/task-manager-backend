@@ -4,6 +4,8 @@ const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
 const cookieParser = require("cookie-parser");
+const passport = require("passport"); // NEW
+require("./config/passport-setup"); // NEW: Require your passport config file
 
 // Import your route files
 const authRoutes = require("./routes/auth");
@@ -15,19 +17,18 @@ const PORT = process.env.PORT || 5000;
 
 // --- CORRECT CORS CONFIGURATION ---
 const corsOptions = {
-  // This must be the EXACT origin of your frontend.
-  // Using an environment variable is best practice.
   origin: process.env.FRONTEND_URL || "http://localhost:5173",
-
-  // This is the crucial part that allows cookies to be sent and received.
   credentials: true,
 };
 
-app.use(cors(corsOptions)); // Apply CORS with the correct options
+app.use(cors(corsOptions));
 
-// Middleware
+// --- Middleware Order ---
 app.use(express.json());
 app.use(cookieParser());
+app.use(passport.initialize()); // NEW: Initialize Passport middleware
+// If you were using traditional sessions (e.g., express-session),
+// passport.session() would go here, but not needed for stateless JWT.
 
 // Connect to MongoDB
 mongoose
