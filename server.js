@@ -4,8 +4,8 @@ const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
 const cookieParser = require("cookie-parser");
-const passport = require("passport"); // NEW
-require("./config/passport-setup"); // NEW: Require your passport config file
+const passport = require("passport");
+require("./config/passport-setup"); // Ensure this setup is for JWT, not sessions
 
 // Import your route files
 const authRoutes = require("./routes/auth");
@@ -26,9 +26,9 @@ app.use(cors(corsOptions));
 // --- Middleware Order ---
 app.use(express.json());
 app.use(cookieParser());
-app.use(passport.initialize()); // NEW: Initialize Passport middleware
-// If you were using traditional sessions (e.g., express-session),
-// passport.session() would go here, but not needed for stateless JWT.
+app.use(passport.initialize()); // Initialize Passport middleware
+// IMPORTANT: For stateless JWT, you do NOT use passport.session()
+// passport.session() is only for traditional session-based authentication.
 
 // Connect to MongoDB
 mongoose
