@@ -13,7 +13,7 @@ const passport = require("passport"); // NEW: Import Passport.js
 // Helper to generate JWT token (existing)
 const generateToken = (id) => {
   return jwt.sign({ id }, process.env.JWT_SECRET, {
-    expiresIn: "1h", // Token expires in 1 hour
+    expiresIn: process.env.JWT_TOKEN_EXPIRES_IN || "1h", // Token expires in 1 hour by default or from env
   });
 };
 
@@ -91,11 +91,21 @@ router.post("/register", async (req, res) => {
     await newUser.save();
 
     const token = generateToken(newUser._id);
+
+    // --- UPDATED COOKIE OPTIONS ---
     const cookieOptions = {
-      expires: new Date(Date.now() + 60 * 60 * 1000), // 1 hour
+      // Use JWT_COOKIE_EXPIRES_IN (e.g., in days) from .env, default to 1 hour
+      expires: new Date(
+        Date.now() +
+          (process.env.JWT_COOKIE_EXPIRES_IN
+            ? parseInt(process.env.JWT_COOKIE_EXPIRES_IN) * 24 * 60 * 60 * 1000
+            : 60 * 60 * 1000)
+      ),
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "None",
+      // Conditionally set secure and sameSite for production
+      ...(process.env.NODE_ENV === "production"
+        ? { secure: true, sameSite: "None" }
+        : {}),
     };
     res.cookie("token", token, cookieOptions);
 
@@ -143,11 +153,21 @@ router.post("/login", async (req, res) => {
     }
 
     const token = generateToken(user._id);
+
+    // --- UPDATED COOKIE OPTIONS ---
     const cookieOptions = {
-      expires: new Date(Date.now() + 60 * 60 * 1000), // 1 hour
+      // Use JWT_COOKIE_EXPIRES_IN (e.g., in days) from .env, default to 1 hour
+      expires: new Date(
+        Date.now() +
+          (process.env.JWT_COOKIE_EXPIRES_IN
+            ? parseInt(process.env.JWT_COOKIE_EXPIRES_IN) * 24 * 60 * 60 * 1000
+            : 60 * 60 * 1000)
+      ),
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "None",
+      // Conditionally set secure and sameSite for production
+      ...(process.env.NODE_ENV === "production"
+        ? { secure: true, sameSite: "None" }
+        : {}),
     };
     res.cookie("token", token, cookieOptions);
 
@@ -170,11 +190,14 @@ router.post("/login", async (req, res) => {
 // @desc    Log out user by clearing the authentication cookie
 // @access  Public
 router.get("/logout", (req, res) => {
+  // --- UPDATED COOKIE OPTIONS ---
   const cookieOptions = {
     httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "None",
-    path: "/",
+    path: "/", // Ensure the path matches where the cookie was set
+    // Conditionally set secure and sameSite for production to ensure cookie is cleared correctly
+    ...(process.env.NODE_ENV === "production"
+      ? { secure: true, sameSite: "None" }
+      : {}),
   };
   res.clearCookie("token", cookieOptions);
   res.status(200).json({ success: true, message: "Logged out successfully!" });
@@ -242,12 +265,20 @@ router.get(
     // Generate YOUR app's JWT for this user (same as standard login)
     const token = generateToken(req.user._id);
 
-    // Set the JWT in an httpOnly cookie
+    // --- UPDATED COOKIE OPTIONS ---
     const cookieOptions = {
-      expires: new Date(Date.now() + 60 * 60 * 1000), // 1 hour
+      // Use JWT_COOKIE_EXPIRES_IN (e.g., in days) from .env, default to 1 hour
+      expires: new Date(
+        Date.now() +
+          (process.env.JWT_COOKIE_EXPIRES_IN
+            ? parseInt(process.env.JWT_COOKIE_EXPIRES_IN) * 24 * 60 * 60 * 1000
+            : 60 * 60 * 1000)
+      ),
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "None",
+      // Conditionally set secure and sameSite for production
+      ...(process.env.NODE_ENV === "production"
+        ? { secure: true, sameSite: "None" }
+        : {}),
     };
     res.cookie("token", token, cookieOptions);
     console.log(
