@@ -59,3 +59,16 @@ app.use((err, req, res, _next) => {
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
+
+app.get("/api/debug-env", (req, res) => {
+  const isProduction = process.env.NODE_ENV === "production";
+  const sameSiteValue = isProduction ? "None" : "Lax (default)";
+  const secureValue = isProduction ? "true" : "false (default)";
+  res.json({
+    NODE_ENV_Backend: process.env.NODE_ENV,
+    isProductionCheck: isProduction,
+    expectedSameSite: sameSiteValue,
+    expectedSecure: secureValue,
+    currentTime: new Date().toISOString(),
+  });
+});
