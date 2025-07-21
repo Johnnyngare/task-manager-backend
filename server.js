@@ -13,6 +13,7 @@ const taskRoutes = require("./routes/tasks");
 const userRoutes = require("./routes/users");
 
 const app = express();
+app.set("trust proxy", 1);
 const PORT = process.env.PORT || 5000;
 
 // --- CORRECT CORS CONFIGURATION ---
